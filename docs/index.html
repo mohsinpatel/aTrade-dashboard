@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aTrade — GLD Grid Plan</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131722; --panel2: #1a1f2e; --border: #232838;
+    --text: #e6e9f0; --muted: #8b93a7; --accent: #4f8cff; --green: #3ecf8e;
+    --red: #ef5a5a; --amber: #e8b93f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 24px 16px 60px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
+  h1 { font-size: 1.4rem; margin: 0; }
+  .updated { color: var(--muted); font-size: 0.85rem; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+  .card .value { font-size: 1.3rem; font-weight: 600; }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 20px; }
+  section h2 { margin: 0 0 14px; font-size: 1rem; color: var(--text); }
+  .muted { color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  tbody tr:hover { background: var(--panel2); }
+  .side-buy { color: var(--green); } .side-sell { color: var(--red); }
+  .status-filled { color: var(--green); } .status-canceled, .status-rejected, .status-expired { color: var(--muted); }
+  .params { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+  .param { background: var(--panel2); border-radius: 8px; padding: 10px 12px; }
+  .param .k { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; }
+  .param .v { font-size: 1rem; font-weight: 600; margin-top: 2px; }
+  .table-scroll { overflow-x: auto; }
+  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+  svg text { fill: var(--muted); font-size: 10px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.72rem; background: var(--panel2); border: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>aTrade — GLD Grid Plan <span class="badge">PAPER</span></h1>
+    <div class="updated" id="updated">loading…</div>
+  </header>
+
+  <div class="cards" id="summaryCards"></div>
+
+  <section>
+    <h2>Equity — daily close</h2>
+    <div id="equityChart"><div class="empty">No history yet.</div></div>
+  </section>
+
+  <section>
+    <h2>Plan</h2>
+    <div id="planBody"><div class="empty">Loading plan…</div></div>
+  </section>
+
+  <section>
+    <h2>Current position</h2>
+    <div id="positionBody"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section>
+    <h2>Trade history</h2>
+    <div class="table-scroll"><table id="tradesTable">
+      <thead><tr>
+        <th>Filled / Submitted</th><th>Symbol</th><th>Side</th><th>Qty</th>
+        <th>Type</th><th>Class</th><th>Fill Price</th><th>Status</th>
+      </tr></thead>
+      <tbody><tr><td colspan="8" class="empty">Loading trades…</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <div class="muted" style="font-size:0.78rem; margin-top: 30px;">
+    Data refreshes once daily from the Alpaca paper account. This dashboard replicates the
+    risk-management style found in historical gold-CFD trade screenshots (fixed-size adds
+    against losing positions, no per-leg stop-loss) — read as an experiment being observed
+    in paper money, not a proven strategy.
+  </div>
+</div>
+
+<script>
+async function fetchJSON(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  if (!r.ok) throw new Error("fetch failed: " + path);
+  return r.json();
+}
+async function fetchJSONL(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  if (!r.ok) return [];
+  const text = await r.text();
+  return text.split("\n").filter(l => l.trim()).map(l => JSON.parse(l));
+}
+function fmtUSD(n) {
+  return "$" + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtPct(n) {
+  const s = (n * 100).toFixed(2) + "%";
+  return (n >= 0 ? "+" : "") + s;
+}
+function el(tag, cls, html) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (html !== undefined) e.innerHTML = html;
+  return e;
+}
+
+function renderEquityChart(rows) {
+  const host = document.getElementById("equityChart");
+  if (!rows.length) return;
+  host.innerHTML = "";
+  const w = Math.max(host.clientWidth || 900, 300), h = 180, pad = 30;
+  const values = rows.map(r => r.equity);
+  const min = Math.min(...values), max = Math.max(...values);
+  const range = (max - min) || 1;
+  const pts = rows.map((r, i) => {
+    const x = pad + (i / Math.max(rows.length - 1, 1)) * (w - pad * 2);
+    const y = h - pad - ((r.equity - min) / range) * (h - pad * 2);
+    return [x, y];
+  });
+  const path = pts.map((p, i) => (i === 0 ? "M" : "L") + p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.setAttribute("width", "100%");
+  svg.setAttribute("height", h);
+  svg.innerHTML = `
+    <line x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}" stroke="#232838" />
+    <path d="${path}" fill="none" stroke="#4f8cff" stroke-width="2" />
+    <text x="${pad}" y="14">${fmtUSD(max)}</text>
+    <text x="${pad}" y="${h-pad+16}">${fmtUSD(min)}</text>
+    <text x="${w-pad}" y="${h-pad+16}" text-anchor="end">${rows[rows.length-1].date}</text>
+    <text x="${pad}" y="${h-pad+30}" text-anchor="start">${rows[0].date}</text>
+  `;
+  host.appendChild(svg);
+}
+
+function renderSummary(account, plan) {
+  const host = document.getElementById("summaryCards");
+  host.innerHTML = "";
+  const dayPl = account.last_equity ? (account.equity - account.last_equity) / account.last_equity : 0;
+  const cards = [
+    ["Equity", fmtUSD(account.equity), ""],
+    ["Cash", fmtUSD(account.cash), ""],
+    ["Buying Power", fmtUSD(account.buying_power), ""],
+    ["Day P&L", fmtPct(dayPl), dayPl >= 0 ? "pos" : "neg"],
+  ];
+  for (const [label, value, cls] of cards) {
+    const c = el("div", "card");
+    c.appendChild(el("div", "label", label));
+    c.appendChild(el("div", "value " + cls, value));
+    host.appendChild(c);
+  }
+}
+
+function renderPlan(plan) {
+  const host = document.getElementById("planBody");
+  if (!plan) { host.innerHTML = '<div class="empty">No plan data yet.</div>'; return; }
+  host.innerHTML = "";
+  host.appendChild(el("div", "", `<strong>${plan.name}</strong> — ${plan.symbol}<br><span class="muted">${plan.description}</span><br><br><span class="muted">Schedule: ${plan.schedule}</span>`));
+  const grid = el("div", "params");
+  grid.style.marginTop = "14px";
+  for (const [k, v] of Object.entries(plan.params || {})) {
+    const p = el("div", "param");
+    p.appendChild(el("div", "k", k.replace(/_/g, " ")));
+    p.appendChild(el("div", "v", typeof v === "number" && v < 1 ? (v*100).toFixed(2) + "%" : String(v)));
+    grid.appendChild(p);
+  }
+  host.appendChild(grid);
+}
+
+function renderPosition(positions) {
+  const host = document.getElementById("positionBody");
+  if (!positions || !positions.length) {
+    host.innerHTML = '<div class="empty">No open position — flat.</div>';
+    return;
+  }
+  host.innerHTML = "";
+  const table = el("table");
+  table.innerHTML = "<thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Avg Entry</th><th>Market Value</th><th>Unrealized P&L</th></tr></thead>";
+  const tbody = el("tbody");
+  for (const p of positions) {
+    const plpc = parseFloat(p.unrealized_plpc || 0);
+    const tr = el("tr", "", `
+      <td>${p.symbol}</td>
+      <td class="${p.side === 'long' ? 'side-buy' : 'side-sell'}">${p.side}</td>
+      <td>${p.qty}</td>
+      <td>${fmtUSD(p.avg_entry_price)}</td>
+      <td>${fmtUSD(p.market_value)}</td>
+      <td class="${plpc >= 0 ? 'pos' : 'neg'}">${fmtPct(plpc)}</td>
+    `);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  host.appendChild(table);
+}
+
+function renderTrades(trades) {
+  const tbody = document.querySelector("#tradesTable tbody");
+  tbody.innerHTML = "";
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">No trades yet.</td></tr>';
+    return;
+  }
+  const sorted = [...trades].sort((a, b) => (b.submitted_at || "").localeCompare(a.submitted_at || "")).slice(0, 200);
+  for (const t of sorted) {
+    const when = t.filled_at || t.submitted_at || "";
+    const fillPrice = t.filled_avg_price ? fmtUSD(t.filled_avg_price) : "—";
+    const sideCls = t.side === "buy" ? "side-buy" : "side-sell";
+    const statusCls = "status-" + (t.status || "");
+    const tr = el("tr", "", `
+      <td>${when.replace("T", " ").replace("Z", "")}</td>
+      <td>${t.symbol || (t.legs ? t.legs.map(l=>l.symbol).join("/") : "")}</td>
+      <td class="${sideCls}">${t.side || (t.order_class === "mleg" ? "spread" : "")}</td>
+      <td>${t.qty || t.filled_qty || ""}</td>
+      <td>${t.type || ""}</td>
+      <td>${t.order_class || "simple"}</td>
+      <td>${fillPrice}</td>
+      <td class="${statusCls}">${t.status || ""}</td>
+    `);
+    tbody.appendChild(tr);
+  }
+}
+
+async function main() {
+  try {
+    const [history, positions, trades, plan] = await Promise.all([
+      fetchJSONL("data/account_history.jsonl"),
+      fetchJSON("data/positions.json").catch(() => ({ positions: [] })),
+      fetchJSONL("data/trades.jsonl"),
+      fetchJSON("data/plan.json").catch(() => null),
+    ]);
+
+    const latestAccount = history.length ? history[history.length - 1] : null;
+    document.getElementById("updated").textContent = latestAccount
+      ? "Data as of " + latestAccount.date + " · captured " + latestAccount.captured_at
+      : "No data yet";
+
+    if (latestAccount) renderSummary(latestAccount, plan);
+    renderEquityChart(history);
+    renderPlan(plan);
+    renderPosition(positions.positions || []);
+    renderTrades(trades);
+  } catch (e) {
+    document.getElementById("updated").textContent = "Error loading data: " + e.message;
+    console.error(e);
+  }
+}
+main();
+</script>
+</body>
+</html>
