@@ -42,10 +42,30 @@
   .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
   svg text { fill: var(--muted); font-size: 10px; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.72rem; background: var(--panel2); border: 1px solid var(--border); }
+
+  #gate { position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; z-index: 10; }
+  #gate .box { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 28px 32px; width: 320px; max-width: 90vw; text-align: center; }
+  #gate h2 { margin: 0 0 6px; font-size: 1.1rem; }
+  #gate p { color: var(--muted); font-size: 0.82rem; margin: 0 0 16px; }
+  #gate input { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel2); color: var(--text); font-size: 1rem; margin-bottom: 10px; }
+  #gate button { width: 100%; padding: 10px 12px; border-radius: 8px; border: none; background: var(--accent); color: #fff; font-size: 0.95rem; cursor: pointer; }
+  #gate .err { color: var(--red); font-size: 0.82rem; min-height: 1.2em; margin-top: 8px; }
+  #content { display: none; }
 </style>
 </head>
 <body>
-<div class="wrap">
+
+<div id="gate">
+  <div class="box">
+    <h2>aTrade — GLD Grid Plan</h2>
+    <p>Enter the password to decrypt and view this dashboard.</p>
+    <input type="password" id="pwInput" placeholder="Password" autofocus>
+    <button id="pwSubmit">Unlock</button>
+    <div class="err" id="pwErr"></div>
+  </div>
+</div>
+
+<div class="wrap" id="content">
   <header>
     <h1>aTrade — GLD Grid Plan <span class="badge">PAPER</span></h1>
     <div class="updated" id="updated">loading…</div>
@@ -80,25 +100,51 @@
   </section>
 
   <div class="muted" style="font-size:0.78rem; margin-top: 30px;">
-    Data refreshes once daily from the Alpaca paper account. This dashboard replicates the
-    risk-management style found in historical gold-CFD trade screenshots (fixed-size adds
-    against losing positions, no per-leg stop-loss) — read as an experiment being observed
-    in paper money, not a proven strategy.
+    Data refreshes once daily from the Alpaca paper account. All data files in this repo are
+    AES-256-GCM encrypted at rest — this page decrypts them locally in your browser after you
+    enter the password; nothing is sent anywhere. This dashboard replicates the risk-management
+    style found in historical gold-CFD trade screenshots (fixed-size adds against losing
+    positions, no per-leg stop-loss) — read as an experiment being observed in paper money, not
+    a proven strategy.
   </div>
 </div>
 
 <script>
-async function fetchJSON(path) {
+// ---- crypto: must match pull_data.py's derive_key / encrypt_text exactly ----
+async function deriveKey(password, saltB64, iterations) {
+  const salt = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0));
+  const baseKey = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+    baseKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["decrypt"]
+  );
+}
+
+async function decryptEnvelope(envelope, password) {
+  const key = await deriveKey(password, envelope.salt, envelope.iterations);
+  const iv = Uint8Array.from(atob(envelope.iv), c => c.charCodeAt(0));
+  const ct = Uint8Array.from(atob(envelope.ct), c => c.charCodeAt(0));
+  const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct);
+  return new TextDecoder().decode(plainBuf);
+}
+
+async function fetchEncrypted(path, password) {
   const r = await fetch(path, { cache: "no-store" });
   if (!r.ok) throw new Error("fetch failed: " + path);
-  return r.json();
+  const envelope = await r.json();
+  return decryptEnvelope(envelope, password);
 }
-async function fetchJSONL(path) {
-  const r = await fetch(path, { cache: "no-store" });
-  if (!r.ok) return [];
-  const text = await r.text();
+
+function parseJSONL(text) {
   return text.split("\n").filter(l => l.trim()).map(l => JSON.parse(l));
 }
+
+// ---- formatting helpers ----
 function fmtUSD(n) {
   return "$" + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
@@ -113,6 +159,7 @@ function el(tag, cls, html) {
   return e;
 }
 
+// ---- rendering ----
 function renderEquityChart(rows) {
   const host = document.getElementById("equityChart");
   if (!rows.length) return;
@@ -142,7 +189,7 @@ function renderEquityChart(rows) {
   host.appendChild(svg);
 }
 
-function renderSummary(account, plan) {
+function renderSummary(account) {
   const host = document.getElementById("summaryCards");
   host.innerHTML = "";
   const dayPl = account.last_equity ? (account.equity - account.last_equity) / account.last_equity : 0;
@@ -229,31 +276,48 @@ function renderTrades(trades) {
   }
 }
 
-async function main() {
+async function loadDashboard(password) {
+  const [historyText, positionsText, tradesText, planText] = await Promise.all([
+    fetchEncrypted("data/account_history.enc", password),
+    fetchEncrypted("data/positions.enc", password),
+    fetchEncrypted("data/trades.enc", password),
+    fetchEncrypted("data/plan.enc", password),
+  ]);
+
+  const history = parseJSONL(historyText);
+  const positions = JSON.parse(positionsText);
+  const trades = parseJSONL(tradesText);
+  const plan = JSON.parse(planText);
+
+  const latestAccount = history.length ? history[history.length - 1] : null;
+  document.getElementById("updated").textContent = latestAccount
+    ? "Data as of " + latestAccount.date + " · captured " + latestAccount.captured_at
+    : "No data yet";
+
+  if (latestAccount) renderSummary(latestAccount);
+  renderEquityChart(history);
+  renderPlan(plan);
+  renderPosition(positions.positions || []);
+  renderTrades(trades);
+}
+
+document.getElementById("pwSubmit").addEventListener("click", unlock);
+document.getElementById("pwInput").addEventListener("keydown", e => { if (e.key === "Enter") unlock(); });
+
+async function unlock() {
+  const password = document.getElementById("pwInput").value;
+  const errEl = document.getElementById("pwErr");
+  errEl.textContent = "";
+  if (!password) return;
   try {
-    const [history, positions, trades, plan] = await Promise.all([
-      fetchJSONL("data/account_history.jsonl"),
-      fetchJSON("data/positions.json").catch(() => ({ positions: [] })),
-      fetchJSONL("data/trades.jsonl"),
-      fetchJSON("data/plan.json").catch(() => null),
-    ]);
-
-    const latestAccount = history.length ? history[history.length - 1] : null;
-    document.getElementById("updated").textContent = latestAccount
-      ? "Data as of " + latestAccount.date + " · captured " + latestAccount.captured_at
-      : "No data yet";
-
-    if (latestAccount) renderSummary(latestAccount, plan);
-    renderEquityChart(history);
-    renderPlan(plan);
-    renderPosition(positions.positions || []);
-    renderTrades(trades);
+    await loadDashboard(password);
+    document.getElementById("gate").style.display = "none";
+    document.getElementById("content").style.display = "block";
   } catch (e) {
-    document.getElementById("updated").textContent = "Error loading data: " + e.message;
+    errEl.textContent = "Incorrect password, or data not decryptable.";
     console.error(e);
   }
 }
-main();
 </script>
 </body>
 </html>

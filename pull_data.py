@@ -1,16 +1,28 @@
 """
-Pulls fresh account/position/order data from Alpaca and updates the
-docs/data/*.json(l) files that the dashboard (docs/index.html) reads.
+Pulls fresh account/position/order data from Alpaca and rewrites the
+docs/data/*.enc files that the dashboard (docs/index.html) reads.
 
-Run from inside aTrade-dashboard/. Reads Alpaca keys from ../.env (the
-aTrade project's existing, git-ignored credentials file) — no keys are
-ever written into this repo.
+The repo is public, so every file it holds is AES-256-GCM encrypted with a
+key derived (PBKDF2-HMAC-SHA256) from DASHBOARD_PASSWORD before it's
+written — the dashboard prompts for that password and decrypts client-side
+with the Web Crypto API. This is meant to keep the raw account/trade data
+private-ish on a public repo, not to be bank-grade security: someone with
+real technical skill and motivation to attack a client-side decrypt could
+still get in.
+
+Run from inside aTrade-dashboard/. Reads Alpaca keys + DASHBOARD_PASSWORD
+from ../.env (the aTrade project's existing, git-ignored credentials
+file) — no secrets are ever written into this repo in plaintext.
 """
 import os
 import json
+import base64
 import datetime
 import requests
 from dotenv import load_dotenv
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(HERE, "..", ".env"))
@@ -18,14 +30,46 @@ load_dotenv(os.path.join(HERE, "..", ".env"))
 ALPACA_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY")
 ALPACA_PAPER = os.getenv("ALPACA_PAPER", "True").lower() in ("1", "true", "yes")
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD")
 BASE = "https://paper-api.alpaca.markets" if ALPACA_PAPER else "https://api.alpaca.markets"
 HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
 
 if not ALPACA_PAPER:
     raise SystemExit("Refusing: ALPACA_PAPER is not True — this dashboard only publishes paper data.")
+if not DASHBOARD_PASSWORD:
+    raise SystemExit("Missing DASHBOARD_PASSWORD in ../.env — required to encrypt published data.")
 
 DATA_DIR = os.path.join(HERE, "docs", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# Fixed, non-secret salt — reused across runs so old + new encrypted files
+# stay decryptable with the same derived key. Salts don't need to be secret,
+# only unique-ish per application; it's committed in every .enc file anyway.
+PBKDF2_SALT = b"aTrade-dashboard-v1-salt"
+PBKDF2_ITERATIONS = 200_000
+
+
+def derive_key(password: str) -> bytes:
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=PBKDF2_SALT, iterations=PBKDF2_ITERATIONS)
+    return kdf.derive(password.encode("utf-8"))
+
+
+def encrypt_text(plaintext: str, key: bytes) -> dict:
+    aesgcm = AESGCM(key)
+    iv = os.urandom(12)
+    ct = aesgcm.encrypt(iv, plaintext.encode("utf-8"), None)  # ciphertext + 16-byte tag appended
+    return {
+        "salt": base64.b64encode(PBKDF2_SALT).decode(),
+        "iterations": PBKDF2_ITERATIONS,
+        "iv": base64.b64encode(iv).decode(),
+        "ct": base64.b64encode(ct).decode(),
+    }
+
+
+def write_encrypted(filename: str, plaintext: str, key: bytes):
+    envelope = encrypt_text(plaintext, key)
+    with open(os.path.join(DATA_DIR, filename), "w") as f:
+        json.dump(envelope, f)
 
 
 def now_iso():
@@ -33,14 +77,25 @@ def now_iso():
 
 
 def main():
-    # --- account snapshot: one row per calendar date (UTC), overwritten if re-run same day ---
+    key = derive_key(DASHBOARD_PASSWORD)
+
+    # --- account snapshot: one row per calendar date (UTC) ---
     account = requests.get(f"{BASE}/v2/account", headers=HEADERS, timeout=20).json()
     today = datetime.date.today().isoformat()
-    hist_path = os.path.join(DATA_DIR, "account_history.jsonl")
+
+    # decrypt existing history (if any) to append to it
+    hist_path = os.path.join(DATA_DIR, "account_history.enc")
     rows = []
     if os.path.exists(hist_path):
-        with open(hist_path) as f:
-            rows = [json.loads(l) for l in f if l.strip()]
+        try:
+            with open(hist_path) as f:
+                envelope = json.load(f)
+            iv = base64.b64decode(envelope["iv"]); ct = base64.b64decode(envelope["ct"])
+            plaintext = AESGCM(key).decrypt(iv, ct, None).decode("utf-8")
+            rows = [json.loads(l) for l in plaintext.split("\n") if l.strip()]
+        except Exception as e:
+            print(f"WARNING: could not decrypt existing account_history.enc ({e}) — starting fresh.")
+            rows = []
     rows = [r for r in rows if r["date"] != today]
     rows.append({
         "date": today,
@@ -53,14 +108,11 @@ def main():
         "captured_at": now_iso(),
     })
     rows.sort(key=lambda r: r["date"])
-    with open(hist_path, "w") as f:
-        for r in rows:
-            f.write(json.dumps(r) + "\n")
+    write_encrypted("account_history.enc", "\n".join(json.dumps(r) for r in rows), key)
 
     # --- current positions snapshot ---
     positions = requests.get(f"{BASE}/v2/positions", headers=HEADERS, timeout=20).json()
-    with open(os.path.join(DATA_DIR, "positions.json"), "w") as f:
-        json.dump({"captured_at": now_iso(), "positions": positions}, f, indent=2)
+    write_encrypted("positions.enc", json.dumps({"captured_at": now_iso(), "positions": positions}), key)
 
     # --- full order/trade history, merged + deduped by order id ---
     all_orders = []
@@ -77,19 +129,25 @@ def main():
             break
         after = batch[-1]["submitted_at"]
 
-    trades_path = os.path.join(DATA_DIR, "trades.jsonl")
+    trades_path = os.path.join(DATA_DIR, "trades.enc")
     existing = {}
     if os.path.exists(trades_path):
-        with open(trades_path) as f:
-            for l in f:
+        try:
+            with open(trades_path) as f:
+                envelope = json.load(f)
+            iv = base64.b64decode(envelope["iv"]); ct = base64.b64decode(envelope["ct"])
+            plaintext = AESGCM(key).decrypt(iv, ct, None).decode("utf-8")
+            for l in plaintext.split("\n"):
                 if l.strip():
                     o = json.loads(l)
                     existing[o["id"]] = o
+        except Exception as e:
+            print(f"WARNING: could not decrypt existing trades.enc ({e}) — starting fresh.")
+            existing = {}
     for o in all_orders:
         existing[o["id"]] = o
-    with open(trades_path, "w") as f:
-        for oid in sorted(existing, key=lambda k: existing[k].get("submitted_at") or ""):
-            f.write(json.dumps(existing[oid]) + "\n")
+    ordered = sorted(existing, key=lambda k: existing[k].get("submitted_at") or "")
+    write_encrypted("trades.enc", "\n".join(json.dumps(existing[oid]) for oid in ordered), key)
 
     # --- plan metadata (rewritten each run for freshness) ---
     plan = {
@@ -112,10 +170,9 @@ def main():
         "source": "gold_grid_bot.py in the aTrade project",
         "updated_at": now_iso(),
     }
-    with open(os.path.join(DATA_DIR, "plan.json"), "w") as f:
-        json.dump(plan, f, indent=2)
+    write_encrypted("plan.enc", json.dumps(plan), key)
 
-    print(f"Updated data for {today}: equity=${float(account['equity']):,.2f}, "
+    print(f"Updated (encrypted) data for {today}: equity=${float(account['equity']):,.2f}, "
           f"positions={len(positions) if isinstance(positions, list) else 0}, "
           f"orders_on_file={len(existing)}")
 
