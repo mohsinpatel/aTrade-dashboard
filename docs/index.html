@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>aTrade — GLD Grid Plan</title>
+<title>aTrade — Trading Platform</title>
 <style>
   :root {
     --bg: #0b0e14; --panel: #131722; --panel2: #1a1f2e; --border: #232838;
@@ -51,13 +51,19 @@
   #gate button { width: 100%; padding: 10px 12px; border-radius: 8px; border: none; background: var(--accent); color: #fff; font-size: 0.95rem; cursor: pointer; }
   #gate .err { color: var(--red); font-size: 0.82rem; min-height: 1.2em; margin-top: 8px; }
   #content { display: none; }
+
+  .account-block { margin-bottom: 40px; }
+  .account-block > h2.account-title { font-size: 1.15rem; margin: 0 0 14px; padding-bottom: 10px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  .nav-pills { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
+  .nav-pills a { color: var(--muted); text-decoration: none; font-size: 0.82rem; padding: 6px 12px; border-radius: 999px; background: var(--panel); border: 1px solid var(--border); }
+  .nav-pills a:hover { color: var(--text); border-color: var(--accent); }
 </style>
 </head>
 <body>
 
 <div id="gate">
   <div class="box">
-    <h2>aTrade — GLD Grid Plan</h2>
+    <h2>aTrade — Trading Platform</h2>
     <p>Enter the password to decrypt and view this dashboard.</p>
     <input type="password" id="pwInput" placeholder="Password" autofocus>
     <button id="pwSubmit">Unlock</button>
@@ -67,45 +73,18 @@
 
 <div class="wrap" id="content">
   <header>
-    <h1>aTrade — GLD Grid Plan <span class="badge">PAPER</span></h1>
+    <h1>aTrade — Trading Platform <span class="badge">PAPER</span></h1>
     <div class="updated" id="updated">loading…</div>
   </header>
 
-  <div class="cards" id="summaryCards"></div>
+  <div class="nav-pills" id="navPills"></div>
 
-  <section>
-    <h2>Equity — daily close</h2>
-    <div id="equityChart"><div class="empty">No history yet.</div></div>
-  </section>
-
-  <section>
-    <h2>Plan</h2>
-    <div id="planBody"><div class="empty">Loading plan…</div></div>
-  </section>
-
-  <section>
-    <h2>Current position</h2>
-    <div id="positionBody"><div class="empty">Loading…</div></div>
-  </section>
-
-  <section>
-    <h2>Trade history</h2>
-    <div class="table-scroll"><table id="tradesTable">
-      <thead><tr>
-        <th>Filled / Submitted</th><th>Symbol</th><th>Side</th><th>Qty</th>
-        <th>Type</th><th>Class</th><th>Fill Price</th><th>Status</th>
-      </tr></thead>
-      <tbody><tr><td colspan="8" class="empty">Loading trades…</td></tr></tbody>
-    </table></div>
-  </section>
+  <div id="accounts"></div>
 
   <div class="muted" style="font-size:0.78rem; margin-top: 30px;">
-    Data refreshes once daily from the Alpaca paper account. All data files in this repo are
+    Data refreshes daily from each account's Alpaca paper account. All data files in this repo are
     AES-256-GCM encrypted at rest — this page decrypts them locally in your browser after you
-    enter the password; nothing is sent anywhere. This dashboard replicates the risk-management
-    style found in historical gold-CFD trade screenshots (fixed-size adds against losing
-    positions, no per-leg stop-loss) — read as an experiment being observed in paper money, not
-    a proven strategy.
+    enter the password; nothing is sent anywhere.
   </div>
 </div>
 
@@ -159,10 +138,10 @@ function el(tag, cls, html) {
   return e;
 }
 
-// ---- rendering ----
-function renderEquityChart(rows) {
-  const host = document.getElementById("equityChart");
-  if (!rows.length) return;
+// ---- rendering (all scoped under a given root element so multiple accounts can coexist) ----
+function renderEquityChart(root, rows) {
+  const host = root.querySelector(".equityChart");
+  if (!rows.length) { host.innerHTML = '<div class="empty">No history yet.</div>'; return; }
   host.innerHTML = "";
   const w = Math.max(host.clientWidth || 900, 300), h = 180, pad = 30;
   const values = rows.map(r => r.equity);
@@ -189,8 +168,8 @@ function renderEquityChart(rows) {
   host.appendChild(svg);
 }
 
-function renderSummary(account) {
-  const host = document.getElementById("summaryCards");
+function renderSummary(root, account) {
+  const host = root.querySelector(".summaryCards");
   host.innerHTML = "";
   const dayPl = account.last_equity ? (account.equity - account.last_equity) / account.last_equity : 0;
   const cards = [
@@ -207,24 +186,24 @@ function renderSummary(account) {
   }
 }
 
-function renderPlan(plan) {
-  const host = document.getElementById("planBody");
+function renderPlan(root, plan) {
+  const host = root.querySelector(".planBody");
   if (!plan) { host.innerHTML = '<div class="empty">No plan data yet.</div>'; return; }
   host.innerHTML = "";
-  host.appendChild(el("div", "", `<strong>${plan.name}</strong> — ${plan.symbol}<br><span class="muted">${plan.description}</span><br><br><span class="muted">Schedule: ${plan.schedule}</span>`));
+  host.appendChild(el("div", "", `<strong>${plan.name}</strong><br><span class="muted">${plan.description}</span><br><br><span class="muted">Schedule: ${plan.schedule}</span>`));
   const grid = el("div", "params");
   grid.style.marginTop = "14px";
   for (const [k, v] of Object.entries(plan.params || {})) {
     const p = el("div", "param");
     p.appendChild(el("div", "k", k.replace(/_/g, " ")));
-    p.appendChild(el("div", "v", typeof v === "number" && v < 1 ? (v*100).toFixed(2) + "%" : String(v)));
+    p.appendChild(el("div", "v", typeof v === "number" && v > 0 && v < 1 ? (v*100).toFixed(2) + "%" : String(v)));
     grid.appendChild(p);
   }
   host.appendChild(grid);
 }
 
-function renderPosition(positions) {
-  const host = document.getElementById("positionBody");
+function renderPosition(root, positions) {
+  const host = root.querySelector(".positionBody");
   if (!positions || !positions.length) {
     host.innerHTML = '<div class="empty">No open position — flat.</div>';
     return;
@@ -249,8 +228,8 @@ function renderPosition(positions) {
   host.appendChild(table);
 }
 
-function renderTrades(trades) {
-  const tbody = document.querySelector("#tradesTable tbody");
+function renderTrades(root, trades) {
+  const tbody = root.querySelector(".tradesTable tbody");
   tbody.innerHTML = "";
   if (!trades.length) {
     tbody.innerHTML = '<tr><td colspan="8" class="empty">No trades yet.</td></tr>';
@@ -276,12 +255,36 @@ function renderTrades(trades) {
   }
 }
 
-async function loadDashboard(password) {
+function accountSectionHTML(slug, name) {
+  return `
+    <h2 class="account-title" id="acct-${slug}">${name} <span class="badge">PAPER</span></h2>
+    <div class="cards summaryCards"></div>
+    <section><h2>Equity — daily close</h2><div class="equityChart"><div class="empty">Loading…</div></div></section>
+    <section><h2>Plan</h2><div class="planBody"><div class="empty">Loading…</div></div></section>
+    <section><h2>Current position</h2><div class="positionBody"><div class="empty">Loading…</div></div></section>
+    <section>
+      <h2>Trade history</h2>
+      <div class="table-scroll"><table class="tradesTable">
+        <thead><tr>
+          <th>Filled / Submitted</th><th>Symbol</th><th>Side</th><th>Qty</th>
+          <th>Type</th><th>Class</th><th>Fill Price</th><th>Status</th>
+        </tr></thead>
+        <tbody><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+      </table></div>
+    </section>
+  `;
+}
+
+async function loadAccount(slug, name, password) {
+  const root = el("div", "account-block");
+  root.innerHTML = accountSectionHTML(slug, name);
+  document.getElementById("accounts").appendChild(root);
+
   const [historyText, positionsText, tradesText, planText] = await Promise.all([
-    fetchEncrypted("data/account_history.enc", password),
-    fetchEncrypted("data/positions.enc", password),
-    fetchEncrypted("data/trades.enc", password),
-    fetchEncrypted("data/plan.enc", password),
+    fetchEncrypted(`data/${slug}/account_history.enc`, password),
+    fetchEncrypted(`data/${slug}/positions.enc`, password),
+    fetchEncrypted(`data/${slug}/trades.enc`, password),
+    fetchEncrypted(`data/${slug}/plan.enc`, password),
   ]);
 
   const history = parseJSONL(historyText);
@@ -290,15 +293,31 @@ async function loadDashboard(password) {
   const plan = JSON.parse(planText);
 
   const latestAccount = history.length ? history[history.length - 1] : null;
-  document.getElementById("updated").textContent = latestAccount
-    ? "Data as of " + latestAccount.date + " · captured " + latestAccount.captured_at
-    : "No data yet";
+  if (latestAccount) renderSummary(root, latestAccount);
+  renderEquityChart(root, history);
+  renderPlan(root, plan);
+  renderPosition(root, positions.positions || []);
+  renderTrades(root, trades);
 
-  if (latestAccount) renderSummary(latestAccount);
-  renderEquityChart(history);
-  renderPlan(plan);
-  renderPosition(positions.positions || []);
-  renderTrades(trades);
+  return latestAccount ? latestAccount.captured_at : null;
+}
+
+async function loadDashboard(password) {
+  const manifestText = await fetchEncrypted("data/manifest.enc", password);
+  const manifest = JSON.parse(manifestText);
+
+  document.getElementById("navPills").innerHTML = manifest.accounts
+    .map(a => `<a href="#acct-${a.slug}">${a.name}</a>`).join("");
+
+  let latestCaptured = null;
+  for (const a of manifest.accounts) {
+    const captured = await loadAccount(a.slug, a.name, password);
+    if (captured && (!latestCaptured || captured > latestCaptured)) latestCaptured = captured;
+  }
+
+  document.getElementById("updated").textContent = latestCaptured
+    ? "Last published " + latestCaptured
+    : "No data yet";
 }
 
 document.getElementById("pwSubmit").addEventListener("click", unlock);
